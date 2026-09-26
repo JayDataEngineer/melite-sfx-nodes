@@ -150,16 +150,66 @@ _DEFAULT_MODEL_DIR = {
     "moss_sfx_v2": "MOSS-SoundEffect-v2.0-src",
 }
 
+# The nested-lane walk stops here: `<top>/hf/<lane>` is depth 2 and the
+# HF-cache spelling `<top>/hf/models--…/snapshots/<sha>` is depth 4.
+_LANE_WALK_DEPTH = 5
+
+
+def _is_lane_dir(path: str) -> bool:
+    """A lane is a directory that carries its own weights — config.json
+    plus a weight file. The HF-cache bookkeeping dirs (blobs/refs)
+    hold weights but no config, so they never pass. `speech_tokenizer`
+    is content-identical to a lane (config + safetensors), so it is
+    excluded STRUCTURALLY, not by name: a walk stops at a lane it has
+    already found, because a lane's children are its own parts."""
+    try:
+        if not os.path.isfile(os.path.join(path, "config.json")):
+            return False
+        for name in os.listdir(path):
+            if name.endswith((".safetensors", ".gguf", ".bin", ".pt")):
+                return True
+    except OSError:
+        return False
+    return False
+
 
 def _list_audiocore_models() -> list[str]:
+    """THE NESTED-LANE COMBO (transcript-015's broken law, fixed
+    2026-09-26): the DECLs address real lanes as NESTED paths —
+    `qwen3-tts/hf/Qwen3-TTS-12Hz-0.6B-Base`, and the HF-cache
+    spelling `qwen3-tts/hf/models--…/snapshots/<sha>` — while this
+    combo enumerated only TOP-LEVEL dirs. ComfyUI validates a combo
+    before the node runs, so every nested lane refused at /prompt
+    with a 400 and no GPU work ever started: the save law proved
+    itself on the one top-level lane and nowhere else. The walk is
+    depth-bounded (`_LANE_WALK_DEPTH`), lane-tested (`_is_lane_dir`),
+    and stops at each lane it accepts, so the combo now offers every
+    lane the estate actually authors in the same relative spelling
+    the DECLs use — `_resolve_model_path` joins it unchanged."""
+    lanes: list[str] = []
     try:
-        entries = sorted(os.listdir(_AUDIOCPP_MODELS_DIR))
-        return [
-            e for e in entries
-            if os.path.isdir(os.path.join(_AUDIOCPP_MODELS_DIR, e))
-        ]
+        root = _AUDIOCPP_MODELS_DIR.rstrip(os.sep)
+        root_depth = root.count(os.sep)
+        for dirpath, dirnames, _filenames in os.walk(root):
+            # the HF-cache bookkeeping dirs hold weight blobs, never a
+            # lane, and descending them is pure cost
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in ("blobs", "refs", ".cache", "__pycache__")
+            ]
+            if dirpath == root:
+                continue
+            if _is_lane_dir(dirpath):
+                lanes.append(os.path.relpath(dirpath, root))
+                # a lane's children are its parts (the speech_tokenizer
+                # half is content-identical to a lane) — stop here
+                dirnames[:] = []
+                continue
+            if dirpath.count(os.sep) - root_depth >= _LANE_WALK_DEPTH:
+                dirnames[:] = []
     except OSError:
-        return []
+        return sorted(set(lanes))
+    return sorted(set(lanes))
 
 
 def _resolve_model_path(model_path: str) -> str:
