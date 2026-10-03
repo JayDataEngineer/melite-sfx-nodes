@@ -1,0 +1,6 @@
+# melite-sfx-nodes — deps BEYOND the engine base env. The
+# moss_sfx_v2 family loads its pipeline through the vendored
+# engines/moss_sfx_impl (upstream license carried alongside).
+# Manager reads this file on install.
+pydantic
+tqdm
