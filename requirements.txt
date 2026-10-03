@@ -4,3 +4,12 @@
 # Manager reads this file on install.
 pydantic
 tqdm
+# lockstep with melite-audio-nodes: the vendored moss_sfx_impl
+# imports these at module level (dac_vae.py: audiotools;
+# wan_audio_dit.py + wan_audio.py: diffusers; wan_prompter.py: ftfy,
+# regex) — both packs ship byte-equivalent copies of the impl, so
+# their declarations stay in lockstep or the copies drift.
+descript-audiotools
+diffusers
+ftfy
+regex

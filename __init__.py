@@ -10,4 +10,11 @@ NODE_CLASS_MAPPINGS = {
     "AudiocoreFamilyInfo": AudiocoreFamilyInfo,
     "AudiocoreTTS": AudiocoreTTS,
 }
-__all__ = list(NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "LoadAudiocoreModel": "LoadAudiocoreModel (Melite)",
+    "UnloadAudiocoreModel": "UnloadAudiocoreModel (Melite)",
+    "AudiocoreFamilyInfo": "AudiocoreFamilyInfo (Melite)",
+    "AudiocoreTTS": "AudiocoreTTS (Melite)",
+}
+
+__all__ = [*NODE_CLASS_MAPPINGS, *NODE_DISPLAY_NAME_MAPPINGS]
