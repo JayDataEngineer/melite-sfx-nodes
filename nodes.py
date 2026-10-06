@@ -251,6 +251,179 @@ def _resolve_input_path(value: str) -> str:
 
 # ── Node: Load Audiocore Model ───────────────────────────────────────────────
 
+def _load_progress_sender():
+    try:
+        from comfy_execution.utils import get_executing_context
+        from server import PromptServer
+
+        ctx = get_executing_context()
+        server = PromptServer.instance
+        client_id = getattr(server, "client_id", None)
+        if ctx is None or ctx.node_id is None or not client_id:
+            return None
+        node_id = ctx.node_id
+        return lambda message: server.send_progress_text(message, node_id, client_id)
+    except Exception:
+        return None
+
+
+def _run_with_load_progress(fn):
+    sender = _load_progress_sender()
+
+    def report(message):
+        if sender is None or not isinstance(message, str) or message == "":
+            return
+        try:
+            sender(message)
+        except Exception:
+            pass
+
+    result_box: dict = {}
+    error_box: list = []
+
+    def _worker() -> None:
+        try:
+            result_box["value"] = fn(report)
+        except BaseException as exc:
+            error_box.append(exc)
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join()
+    if error_box:
+        raise error_box[0]
+    return result_box["value"]
+
+
+FAMILY_NAMES = {
+    "moss_tts_nano": "MOSS-TTS Nano (8B, Unigram tokenizer)",
+    "moss_tts_local": "MOSS-TTS Local (8B, BPE tokenizer)",
+    "qwen3_tts": "Qwen3-TTS (1.7B)",
+    "ace_step": "ACE-Step (music)",
+    "moss_sfx_v2": "MOSS-SFX v2 (sound effects)",
+}
+
+_DEFAULT_MODEL_DIR = {
+    "moss_tts_nano": "moss-tts",
+    "moss_tts_local": "moss-tts",
+    "qwen3_tts": "qwen3-tts",
+    "ace_step": "acestep-cpp-converted",
+    # Torch checkpoint (model_index.json) — GGUF dirs are retired for this
+    # family (2026-08-11: the pure-torch pipeline replaces the C++ engine).
+    "moss_sfx_v2": "MOSS-SoundEffect-v2.0-src",
+}
+
+
+_WEIGHT_FILE_NAMES = ("model.safetensors", "model_index.json")
+_WEIGHT_FILE_SUFFIXES = (".gguf",)
+# Walk bound: the provisioning tree nests at most a few levels (the
+# HF cache layout is <name>/snapshots/<hash>/); unbounded recursion
+# over a shared models mount is a boot-time hazard.
+_MAX_WALK_DEPTH = 5
+
+
+def _dir_holds_weights(abs_dir: str) -> bool:
+    try:
+        names = os.listdir(abs_dir)
+    except OSError:
+        return False
+    for n in names:
+        if n in _WEIGHT_FILE_NAMES:
+            return True
+        if n.endswith(_WEIGHT_FILE_SUFFIXES):
+            return True
+    return False
+
+
+# Support artifacts, never lane addresses: the speech tokenizer rides
+# INSIDE its model dir (its own weight files make it a false choice),
+# and blobs/ are the HF cache's raw internals.
+_SKIP_DIR_NAMES = {"speech_tokenizer", "blobs", "refs", "__pycache__"}
+
+
+def _list_audiocore_models() -> list[str]:
+    """The combo enum serves the REAL provisioning tree (2026-09-24,
+    transcript-015): top-level dirs stay choices (legacy behavior —
+    container dirs like qwen3-tts/ ride even without direct weights),
+    and every nested dir that DIRECTLY holds weights is a choice too —
+    the HF cache layout (<root>/<name>/snapshots/<hash>/model.safetensors)
+    is how the qwen3-tts lanes ship. Before this, ComfyUI's combo
+    validation refused every nested lane address at /prompt (400)
+    even though _resolve_model_path would have joined it fine."""
+    found: list[str] = []
+    root = _AUDIOCPP_MODELS_DIR
+
+    def walk(rel: str, depth: int) -> None:
+        abs_dir = os.path.join(root, rel) if rel else root
+        try:
+            entries = sorted(os.listdir(abs_dir))
+        except OSError:
+            return
+        for e in entries:
+            if e in _SKIP_DIR_NAMES:
+                continue
+            rel_child = f"{rel}/{e}" if rel else e
+            abs_child = os.path.join(root, rel_child)
+            if not os.path.isdir(abs_child):
+                continue
+            # Top-level dirs are choices regardless (kept: the legacy
+            # enum + container dirs); a nested dir is a choice only
+            # when it DIRECTLY holds weights.
+            if not rel or _dir_holds_weights(abs_child):
+                found.append(rel_child)
+            # Nested dirs recurse whether or not they hold weights
+            # directly (their children may — the snapshot layout).
+            if depth < _MAX_WALK_DEPTH:
+                walk(rel_child, depth + 1)
+
+    try:
+        walk("", 0)
+    except OSError:
+        return []
+    return sorted(set(found))
+
+
+def _resolve_model_path(model_path: str) -> str:
+    if os.path.isabs(model_path):
+        return model_path
+    try:
+        import folder_paths
+        resolved = folder_paths.get_full_path("audiocore", model_path)
+        if resolved and os.path.exists(resolved):
+            return resolved
+    except ImportError:
+        pass
+    return os.path.join(_AUDIOCPP_MODELS_DIR, model_path)
+
+
+def _resolve_input_path(value: str) -> str:
+    """Resolve a file input to a container-absolute path.
+
+    Reference audio / .qvoice files arrive as bare ComfyUI input-dir
+    filenames (uploaded via /upload/image — the same convention LoadImage
+    uses) OR as absolute host paths (drag-and-drop from the assets
+    sidebar, e.g. /mnt/data/models/audio/voices/Cherry.qvoice). The
+    engine's os.path.isfile() checks run against the CONTAINER filesystem,
+    so bare names must be joined with ComfyUI's input directory here —
+    the one boundary every entry path (/v1/run, pipeline families, raw
+    API) crosses. Unresolvable values pass through unchanged; the engine
+    raises its own clear error.
+    """
+    if not value or os.path.isfile(value):
+        return value
+    try:
+        import folder_paths
+        candidate = os.path.join(folder_paths.get_input_directory(), value)
+        if os.path.isfile(candidate):
+            return candidate
+    except ImportError:
+        pass
+    return value
+
+
+# ── Node: Load Audiocore Model ───────────────────────────────────────────────
+
+
 class LoadAudiocoreModel:
     """Load an audiocore model.
 
@@ -307,10 +480,7 @@ class LoadAudiocoreModel:
             except ValueError:
                 logger.warning("LoadAudiocoreModel: ignoring bad extras JSON: %s", extras)
         m = ManagedModel(family, resolved_path, extras=extras_dict)
-        # Native load: the C++ engine loads GGUFs + migrates tensors to GPU.
-        # No progress fallback (2026-08-10): the load call reports nothing, so
-        # nothing is emitted — the node's running→finished lifecycle still shows.
-        if not _run_with_progress(lambda report: m.load()):
+        if not _run_with_load_progress(lambda report: m.load(on_progress=report)):
             raise RuntimeError(f"Failed to load {family} from {resolved_path}")
         return (m,)
 
@@ -373,6 +543,7 @@ class AudiocoreFamilyInfo:
             )
         text = "\n".join(lines)
         return {"ui": {"text": [text]}, "result": (text,)}
+
 
 class AudiocoreTTS:
     """Text-to-speech AND sound-effect generation via the native engine_runtime.
@@ -496,6 +667,15 @@ class AudiocoreTTS:
         if call_kwargs.get("voice_file"):
             call_kwargs["voice_file"] = _resolve_input_path(
                 call_kwargs["voice_file"])
+
+        # "none" = NO preset speaker (operator 2026-09-24): the card offers
+        # it so a CustomVoice run doesn't force a default timbre (Ryan/
+        # Vivian/…). Normalized to EMPTY here — the engine boundary — so
+        # the identity comes from whatever actually rides (a .qvoice via
+        # VoiceStudio's torch path), or the engine refuses loud when
+        # nothing does. Never a silent fallback to a preset.
+        if call_kwargs.get("voice") == "none":
+            call_kwargs["voice"] = ""
 
         # ── Voice file loading + PCA steering ──
         voice_file = call_kwargs.pop("voice_file", "")
